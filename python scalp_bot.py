@@ -37,7 +37,7 @@ LOT_QTY       = 0.77        # Fractional shares per cycle
 
 #  ATR & volatility
 ATR_PERIOD    = 14          # ATR length (in 1 min bars)
-MIN_ATR_EUR   = 1.00        # Skip trading if ATR < €1.00 (too quiet)
+MIN_ATR_EUR   = 2.00        # Skip trading if ATR < €1.00 (too quiet)
 
 #  Entry / exit thresholds (multiples of ATR)
 SELL_ATR_K    = 1.0         # If red candle’s drop ≥ 1.0×ATR → SELL
@@ -55,6 +55,11 @@ POLL_PRICE_SEC  = 5         # Check prices every 5 s during buy/stop loops
 
 #  Risk management
 DAILY_LOSS_LIMIT = 20.0     # If you lose ≥ €20 in one day, halt until midnight
+
+#  Edge-case thresholds
+MAX_SPREAD_EUR   = 0.20     # Skip bar if ask-bid > €0.20 (low liquidity)
+GAP_FAILSAFE_MULT = 0.995   # If mid ≤ 0.995×stop → failsafe
+MIN_PRICE_MOVE   = 0.005    # Only move trailing if at least €0.005
 # ───── END CONFIGURATION ─────
 
 def _url(path: str) -> str:
@@ -74,7 +79,7 @@ def search_instrument(symbol: str, asset_type: str="EQUITY") -> str:
         raise RuntimeError(f"No instrument found for '{symbol}'")
     # Prefer exact symbol match
     for inst in results:
-        if inst.get("symbol") == symbol and inst.get("assetType")==asset_type:
+        if inst.get("symbol") == symbol and inst.get("assetType") == asset_type:
             return inst["id"]
     return results[0]["id"]
 
@@ -122,7 +127,7 @@ def get_last_price(inst_id: str) -> dict:
     )
     r.raise_for_status()
     resp = r.json()
-    return {"bid": float(resp["bid"]), "ask": float(resp["ask"])}
+    return {"bid": float(resp["bid"]), "ask": float(resp["ask"]) }
 
 def place_market_order(inst_id: str, qty: float) -> str:
     """Place MARKET BUY (or SELL) of qty shares. Returns orderId."""
@@ -233,7 +238,13 @@ def main():
             continue
 
         # 3) Fetch recent bars (ATR_PERIOD+2)
-        df = get_historical_bars(inst_id, minutes=ATR_PERIOD+2)
+        try:
+            df = get_historical_bars(inst_id, minutes=ATR_PERIOD+2)
+        except Exception as e:
+            print(f"[{now}] ❌ Error fetching bars: {e}. Sleeping {POLL_BAR_SEC}s.")
+            time.sleep(POLL_BAR_SEC)
+            continue
+
         if df.empty or len(df) < ATR_PERIOD + 1:
             print(f"[{now}] Not enough bars ({len(df)}); waiting {POLL_BAR_SEC}s.")
             time.sleep(POLL_BAR_SEC)
@@ -246,11 +257,11 @@ def main():
             time.sleep(POLL_BAR_SEC)
             continue
 
-        # New 1-min bar just appeared
+        # New 1-min bar detected
         last_bar_time = bar_time
         print(f"\n[{bar_time}] Bar closed: O={latest_bar['open']} H={latest_bar['high']} L={latest_bar['low']} C={latest_bar['close']}")
 
-        # 4) Compute ATR on prior ATR_PERIOD bars (exclude current)
+        # 4) Compute ATR on prior ATR_PERIOD bars
         atr_df = df.iloc[-(ATR_PERIOD+1):-1]
         atr = compute_atr(atr_df, period=ATR_PERIOD)
         print(f"  → ATR({ATR_PERIOD}) = €{atr:.2f}")
@@ -263,21 +274,27 @@ def main():
         pos = get_open_position(inst_id)
         qty = pos.get("quantity", 0.0)
 
+        # 5) Check liquidity: skip if spread too wide
+        px = get_last_price(inst_id)
+        spread = px["ask"] - px["bid"]
+        if spread > MAX_SPREAD_EUR:
+            print(f"  ⚠️ Spread (€{spread:.2f}) > MAX_SPREAD (€{MAX_SPREAD_EUR:.2f}); skipping bar.")
+            time.sleep(POLL_BAR_SEC)
+            continue
+
         # ── MODE_COMPOUND HANDLER ──
         if MODE_COMPOUND and not pos:
-            # Deploy ALL cash if enough to buy at least ATR worth
-            px = get_last_price(inst_id)
             cash = get_cash_balance()
-            est_qty = cash / px["ask"]
+            est_qty = cash / px["ask"] if px["ask"]>0 else 0
             if est_qty * px["ask"] >= MIN_ATR_EUR:
                 print(f"  ↪ MODE_COMPOUND: Market-BUY ~{est_qty:.4f} shares (all cash).")
                 buy_id = place_market_order(inst_id, est_qty)
-                # Wait for fill
                 entry_price = None
                 while True:
-                    st = get_order_status(buy_id)["status"]
+                    status = get_order_status(buy_id)
+                    st = status["status"]
                     if st == "FILLED":
-                        entry_price = get_order_status(buy_id)["avgPrice"]
+                        entry_price = status.get("avgPrice")
                         print(f"    ✓ Compound BUY filled @ €{entry_price:.2f}")
                         break
                     elif st in ("CANCELLED","REJECTED","EXPIRED"):
@@ -286,7 +303,6 @@ def main():
                         break
                     time.sleep(POLL_PRICE_SEC)
                 if entry_price is not None:
-                    # Place initial STOP and trail
                     initial_stop = entry_price - STOP_ATR_K * atr
                     stop_id = place_stop_order(inst_id, est_qty, initial_stop)
                     print(f"    🛡️ COMPOUND STOP @ €{initial_stop:.2f}")
@@ -294,10 +310,9 @@ def main():
                     handle_trailing_and_failsafe(inst_id, pos2, atr, daily_pnl)
                 continue
             else:
-                print(f"  ⚠️ MODE_COMPOUND: not enough cash (€{cash:.2f}) to buy ≥ €{MIN_ATR_EUR:.2f} ATR.")
-                # Fall through to BASIC checks if both modes are True
+                print(f"  ⚠️ MODE_COMPOUND: Not enough cash (€{cash:.2f}) to buy ≥ €{MIN_ATR_EUR:.2f} ATR.")
 
-        # ── MODE_BASIC: SELL-RED-CANDLE & BUY-BACK ──
+        # ── MODE_BASIC HANDLER ──
         if MODE_BASIC and not pos:
             open_p  = latest_bar["open"]
             close_p = latest_bar["close"]
@@ -310,9 +325,10 @@ def main():
                     # Wait for fill
                     sale_price = None
                     while True:
-                        st = get_order_status(sell_id)["status"]
+                        status = get_order_status(sell_id)
+                        st = status["status"]
                         if st == "FILLED":
-                            sale_price = get_order_status(sell_id)["avgPrice"]
+                            sale_price = status.get("avgPrice")
                             print(f"    ✓ Sold {qty} @ €{sale_price:.2f}")
                             break
                         elif st in ("CANCELLED","REJECTED","EXPIRED"):
@@ -341,6 +357,7 @@ def main():
 
         time.sleep(POLL_BAR_SEC)
 
+
 def handle_buyback(inst_id: str, quantity: float, sale_price: float, atr: float, daily_pnl_ref: float):
     """
     After a market SELL @ sale_price, place a LIMIT BUY-BACK @ sale_price
@@ -351,9 +368,10 @@ def handle_buyback(inst_id: str, quantity: float, sale_price: float, atr: float,
 
     entry_price = None
     while True:
-        st = get_order_status(buy_id)["status"]
+        status = get_order_status(buy_id)
+        st = status["status"]
         if st == "FILLED":
-            entry_price = get_order_status(buy_id)["avgPrice"]
+            entry_price = status.get("avgPrice")
             print(f"    ✓ Buy-back filled @ €{entry_price:.2f}")
             break
         elif st in ("CANCELLED","REJECTED","EXPIRED"):
@@ -366,6 +384,7 @@ def handle_buyback(inst_id: str, quantity: float, sale_price: float, atr: float,
     print(f"    🛡️ Placed STOP-LOSS @ €{initial_stop:.2f}")
     pos2 = {"quantity": quantity, "entryPrice": entry_price, "stopOrderId": stop_id, "stopPrice": initial_stop}
     handle_trailing_and_failsafe(inst_id, pos2, atr, daily_pnl_ref)
+
 
 def handle_trailing_and_failsafe(inst_id: str, pos: dict, atr: float, daily_pnl_ref: float):
     """
@@ -381,9 +400,9 @@ def handle_trailing_and_failsafe(inst_id: str, pos: dict, atr: float, daily_pnl_
         px = get_last_price(inst_id)
         mid = (px["bid"] + px["ask"]) / 2
 
-        # 1) Trailing stop: move up if (mid - TRAIL_ATR_K*ATR) > old_stop + €0.005
+        # 1) Trailing stop: move up if (mid - TRAIL_ATR_K*ATR) > old_stop + MIN_PRICE_MOVE
         new_stop = mid - TRAIL_ATR_K * atr
-        if new_stop > stop_price + 0.005:
+        if new_stop > stop_price + MIN_PRICE_MOVE:
             print(f"      ↗️ Moving stop: {stop_price:.2f} → {new_stop:.2f}")
             try:
                 cancel_order(stop_id)
@@ -394,18 +413,19 @@ def handle_trailing_and_failsafe(inst_id: str, pos: dict, atr: float, daily_pnl_
             pos["stopOrderId"] = stop_id
             pos["stopPrice"]   = stop_price
 
-        # 2) Failsafe: if mid ≤ 0.995 × stop_price and stop not yet filled
-        if mid <= 0.995 * stop_price:
-            print(f"      🚨 Failsafe: mid (€{mid:.2f}) ≤ 0.995×stop (€{stop_price:.2f}); market-sell")
+        # 2) Failsafe: if mid ≤ GAP_FAILSAFE_MULT*stop_price
+        if mid <= GAP_FAILSAFE_MULT * stop_price:
+            print(f"      🚨 Failsafe: mid (€{mid:.2f}) ≤ {GAP_FAILSAFE_MULT}×stop (€{stop_price:.2f}); market-sell")
             try:
                 cancel_order(stop_id)
             except:
                 pass
             sell_id = place_market_order(inst_id, quantity)
             while True:
-                st2 = get_order_status(sell_id)["status"]
+                status2 = get_order_status(sell_id)
+                st2 = status2["status"]
                 if st2 == "FILLED":
-                    exit_price = get_order_status(sell_id)["avgPrice"]
+                    exit_price = status2.get("avgPrice")
                     pnl = round((exit_price - entry_price) * quantity, 2)
                     daily_pnl_ref += pnl
                     print(f"        ✖️ Forced sell @ €{exit_price:.2f} → P/L=€{pnl:.2f} | Daily P&L=€{daily_pnl_ref:.2f}")
@@ -415,7 +435,7 @@ def handle_trailing_and_failsafe(inst_id: str, pos: dict, atr: float, daily_pnl_
         # 3) If STOP triggers normally
         status = get_order_status(stop_id)
         if status["status"] == "FILLED":
-            exit_price = status["avgPrice"]
+            exit_price = status.get("avgPrice")
             pnl = round((exit_price - entry_price) * quantity, 2)
             daily_pnl_ref += pnl
             print(f"      🔴 STOP hit @ €{exit_price:.2f} → P/L=€{pnl:.2f} | Daily P&L=€{daily_pnl_ref:.2f}")
