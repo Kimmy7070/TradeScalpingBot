@@ -9,18 +9,16 @@ import numpy as np
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
-# ──────────  1. LOAD ENV & CONFIGURATION  ──────────
-
+# ───────  CONFIGURE DEMO vs. LIVE  ───────
 load_dotenv()  # loads T212_API_KEY and T212_ENV from .env
 
 API_KEY = os.getenv("T212_API_KEY", "").strip()
-ENV     = os.getenv("T212_ENV", "demo").strip().lower()
+T212_ENV = os.getenv("T212_ENV", "demo").strip().lower()
 
 if not API_KEY:
     raise RuntimeError("Missing T212_API_KEY in environment/.env")
 
-# Choose base URL based on ENV
-if ENV == "live":
+if T212_ENV == "live":
     BASE_URL = "https://api.trading212.com"
 else:
     BASE_URL = "https://demo.trading212.com"
@@ -33,7 +31,7 @@ HEADERS = {
 # ──────── CONFIGURATION ────────
 #  Instrument & quantity
 SYMBOL        = "RHM"       # Ticker you want to scalp
-LOT_QTY       = 0.77        # Fractional shares per cycle
+LOT_QTY       = 0.80        # Fractional shares per cycle
 
 #  ATR & volatility
 ATR_PERIOD    = 14          # ATR length (in 1 min bars)
