@@ -13,8 +13,8 @@ import types
 import logging
 import argparse
 import requests
-import types 
-from packaging.version import Version as LooseVersion
+import types
+from packaging.version import Version as _PackagingVersion
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.support.ui import WebDriverWait
@@ -23,9 +23,30 @@ from selenium.webdriver.common.by import By
 from webdriver_manager.chrome import ChromeDriverManager
 from dotenv import load_dotenv
 
+# ─── Import distutils.version.LooseVersion for Python 3.12+ ──────────────────
+class LooseVersionShim:
+    """
+    A thin wrapper around packaging.version.Version that exposes a .version tuple,
+    so that code expecting distutils.version.LooseVersion.version still works.
+    """
+    def __init__(self, v):
+        # v might already be a Version or a string; convert to packaging.Version
+        if isinstance(v, _PackagingVersion):
+            self._v = v
+        else:
+            self._v = _PackagingVersion(v)
+        # .release is a tuple of ints or strings; that satisfies .version
+        self.version = tuple(self._v.release)
+
+    def __str__(self):
+        return str(self._v)
+
+    def __repr__(self):
+        return f"LooseVersionShim('{str(self._v)}')"
+
 # ─── Monkey‐patch distutils.version.LooseVersion for Python 3.12+ ─────────────
 
-distutils_version = types.SimpleNamespace(LooseVersion=LooseVersion)
+distutils_version = types.SimpleNamespace(LooseVersion=LooseVersionShim)
 sys.modules["distutils"] = types.SimpleNamespace(version=distutils_version)
 sys.modules["distutils.version"] = distutils_version
 
@@ -131,21 +152,20 @@ def fetch_cloudflare_cookies() -> requests.cookies.RequestsCookieJar:
 
     # ─── Build ChromeOptions; we’ll still set a normal user-agent ─────────────────
     chrome_options = Options()
-    # We want a visible window so you can manually log in
-    # (no --headless)
+    # We want a visible window so you can manually log in (no --headless)
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--window-size=1200,800")
 
-    # Spoof a normal Chrome user-agent (avoid “HeadlessChrome”)
+    # Spoof a normal Chrome user-agent (avoid “HeadlessChrome” substring)
     chrome_options.add_argument(
         "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/114.0.0.0 Safari/537.36"
     )
 
-    # ─── Launch undetected_chromedriver (inherits all built-in stealth patches) ───
+    # ─── Launch undetected_chromedriver (inherits stealth patches) ───────────────
     driver = uc.Chrome(options=chrome_options)
 
     try:
@@ -159,8 +179,8 @@ def fetch_cloudflare_cookies() -> requests.cookies.RequestsCookieJar:
         print("⚠️  A Chrome window (undetected) has opened. Please do the following:")
         print("   1) If you see a Trading 212 login screen, enter your demo credentials.")
         print("   2) Complete any 2FA or Cloudflare challenge until you see your dashboard.")
-        print("   3) Once your dashboard is visible (no more login or “Access Denied”),")
-        print("      come back to this terminal and press Enter to continue.")
+        print("   3) Once your dashboard is visible (no more 'Access Denied'),")
+        print("      return to this terminal and press Enter to continue.")
         print("──────────────────────────────────────────────────────────────────────────\n")
         input("Press Enter after you confirm you’re on the Trading 212 dashboard…")
 
@@ -184,7 +204,7 @@ def fetch_cloudflare_cookies() -> requests.cookies.RequestsCookieJar:
             driver.quit()
             sys.exit(1)
 
-        # ─── Brief pause for any ancillary cookies (session, preferences, etc.) ─────
+        # ─── Brief pause so any other site cookies (session, preferences, etc.) set ──
         time.sleep(1)
 
         # ─── Extract ALL cookies from undetected-Chrome into a RequestsCookieJar ────
