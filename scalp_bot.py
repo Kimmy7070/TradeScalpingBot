@@ -104,21 +104,20 @@ def safe_sleep(seconds: float):
 # STEP 1: Use Selenium to “solve” Cloudflare and grab cookies
 # ----------------------------------------------------------------------------
 
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.common.exceptions import TimeoutException
-
 def fetch_cloudflare_cookies() -> requests.cookies.RequestsCookieJar:
     """
-    1) Launch a visible Chrome window with anti-detection flags.
+    1) Launch a visible Chrome window with anti‐detection flags.
     2) Navigate to BASE_URL (demo.trading212.com or api.trading212.com).
-    3) Pause and ask the user to confirm they are fully logged in (dashboard visible).
-    4) Once the user presses Enter, extract ALL cookies (including cf_clearance).
-    5) Quit Chrome and return a RequestsCookieJar containing those cookies.
+    3) Pause and let the user log in fully (dashboard visible) and press Enter.
+    4) Perform a GET on /rest/v2/instruments/search?query=AAPL&assetTypes=EQUITY 
+       to force Cloudflare to set cf_clearance for that API path.
+    5) Extract all cookies (including cf_clearance) into RequestsCookieJar.
+    6) Quit Chrome and return that jar. If cf_clearance never appears, exit.
     """
     logger.info("Starting visible Chrome (Selenium) to solve Cloudflare…")
 
     chrome_options = Options()
-    # ── Remove --headless so we run a real browser window ──────────────────────────
+    # Remove --headless so we run a real browser window
     # chrome_options.add_argument("--headless")
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--no-sandbox")
@@ -137,14 +136,14 @@ def fetch_cloudflare_cookies() -> requests.cookies.RequestsCookieJar:
     chrome_options.add_experimental_option("useAutomationExtension", False)
     chrome_options.add_argument("--disable-blink-features=AutomationControlled")
 
-    # Install or locate the matching ChromeDriver
+    # 1) Install or locate the matching ChromeDriver
     service = Service(ChromeDriverManager().install())
 
-    # 1) Launch Chrome (visible)
+    # 2) Launch Chrome (visible)
     driver = webdriver.Chrome(service=service, options=chrome_options)
 
     try:
-        # 2) Inject JS to hide navigator.webdriver
+        # 3) Inject JS to hide navigator.webdriver
         driver.execute_cdp_cmd(
             "Page.addScriptToEvaluateOnNewDocument",
             {
@@ -160,17 +159,42 @@ def fetch_cloudflare_cookies() -> requests.cookies.RequestsCookieJar:
         logger.debug(f"Selenium → GET {homepage}")
         driver.get(homepage)
 
-        # 3) Pause and let the user do everything manually (login, pass CF challenge, etc.)
+        # 4) Pause and let the user log in and wait until dashboard is visible
         print("\n──────────────────────────────────────────────────────────────────────────")
-        print("⚠️  Chrome is now open. Please do the following:")
+        print("⚠️  Chrome has opened. Please do the following to complete login:")
         print("   1) If you see a Trading 212 login page, enter your demo credentials.")
-        print("   2) Complete any 2FA or additional challenge until you see your dashboard.")
-        print("   3) Once you are fully logged in and you see your account dashboard,")
-        print("      come back to this terminal and press Enter to continue.")
+        print("   2) Complete any 2FA or challenge until you see your demo dashboard.")
+        print("   3) Once the dashboard is fully visible (no “Access Denied”),")
+        print("      return here and press Enter to continue.")
         print("──────────────────────────────────────────────────────────────────────────\n")
-        input("Press Enter after you have confirmed you’re on the Trading 212 dashboard…")
+        input("Press Enter after you confirm you’re on the Trading 212 dashboard…")
 
-        # 4) Once the user confirms (presses Enter), grab all cookies
+        # 5) Now force Cloudflare to set cookies on the exact API path:
+        api_test_url = (
+            f"{BASE_URL}/rest/v2/instruments/search"
+            "?query=AAPL&assetTypes=EQUITY"
+        )
+        logger.debug(f"Selenium → GET {api_test_url} to trigger CF on API path")
+        driver.get(api_test_url)
+
+        # 6) Wait up to 15s for cf_clearance to appear for that domain/path
+        try:
+            WebDriverWait(driver, 15).until(
+                lambda d: d.get_cookie("cf_clearance") is not None
+            )
+            logger.debug("✅ Cloudflare clearance cookie detected.")
+        except TimeoutException:
+            logger.error(
+                "❌ Timed out (15s) waiting for Cloudflare clearance cookie on API path. "
+                "Either CF challenge failed or cookie wasn’t set."
+            )
+            driver.quit()
+            sys.exit(1)
+
+        # 7) Small pause so any additional cookies can set
+        time.sleep(1)
+
+        # 8) Extract all cookies from Selenium’s store
         selenium_cookies = driver.get_cookies()
         jar = requests.cookies.RequestsCookieJar()
         for c in selenium_cookies:
@@ -180,7 +204,6 @@ def fetch_cloudflare_cookies() -> requests.cookies.RequestsCookieJar:
                 domain=c["domain"],
                 path=c.get("path", "/")
             )
-
         logger.debug(f"Extracted {len(selenium_cookies)} cookies (including cf_clearance).")
 
     finally:
