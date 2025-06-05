@@ -104,13 +104,16 @@ def safe_sleep(seconds: float):
 # STEP 1: Use Selenium to “solve” Cloudflare and grab cookies
 # ----------------------------------------------------------------------------
 
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.common.exceptions import TimeoutException
+
 def fetch_cloudflare_cookies() -> requests.cookies.RequestsCookieJar:
     """
-    1) Launch a “visible” (non-headless) Chrome via Selenium, with anti-detection switches.
+    1) Launch a visible Chrome window with anti-detection flags.
     2) Navigate to BASE_URL (demo.trading212.com or api.trading212.com).
-    3) Wait (up to 15s) for the "cf_clearance" cookie to appear.
-    4) Once found, extract all cookies (including cf_clearance) into a RequestsCookieJar.
-    5) Quit Chrome and return that jar. If cf_clearance never appears, exit early.
+    3) Pause and ask the user to confirm they are fully logged in (dashboard visible).
+    4) Once the user presses Enter, extract ALL cookies (including cf_clearance).
+    5) Quit Chrome and return a RequestsCookieJar containing those cookies.
     """
     logger.info("Starting visible Chrome (Selenium) to solve Cloudflare…")
 
@@ -122,14 +125,14 @@ def fetch_cloudflare_cookies() -> requests.cookies.RequestsCookieJar:
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--window-size=1200,800")
 
-    # Avoid “HeadlessChrome” in the User-Agent header:
+    # Spoof a normal Chrome user‐agent
     chrome_options.add_argument(
         "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/114.0.0.0 Safari/537.36"
     )
 
-    # Anti-automation flags (same as before)
+    # Anti‐automation flags so Cloudflare can’t detect headless
     chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
     chrome_options.add_experimental_option("useAutomationExtension", False)
     chrome_options.add_argument("--disable-blink-features=AutomationControlled")
@@ -137,17 +140,17 @@ def fetch_cloudflare_cookies() -> requests.cookies.RequestsCookieJar:
     # Install or locate the matching ChromeDriver
     service = Service(ChromeDriverManager().install())
 
-    # Launch Chrome (visible window)
+    # 1) Launch Chrome (visible)
     driver = webdriver.Chrome(service=service, options=chrome_options)
 
     try:
-        # Inject JS to hide webdriver flag
+        # 2) Inject JS to hide navigator.webdriver
         driver.execute_cdp_cmd(
             "Page.addScriptToEvaluateOnNewDocument",
             {
                 "source": """
                     Object.defineProperty(navigator, 'webdriver', {
-                      get: () => undefined
+                        get: () => undefined
                     });
                 """
             }
@@ -157,23 +160,17 @@ def fetch_cloudflare_cookies() -> requests.cookies.RequestsCookieJar:
         logger.debug(f"Selenium → GET {homepage}")
         driver.get(homepage)
 
-        # Wait up to 15 seconds for Cloudflare’s “cf_clearance” cookie
-        try:
-            WebDriverWait(driver, 15).until(
-                lambda d: d.get_cookie("cf_clearance") is not None
-            )
-            logger.debug("✅ Cloudflare clearance cookie detected.")
-        except TimeoutException:
-            logger.error(
-                "❌ Timed out waiting for Cloudflare clearance cookie. "
-                "Perhaps your IP/VPN is blocked or the challenge failed."
-            )
-            driver.quit()
-            sys.exit(1)
+        # 3) Pause and let the user do everything manually (login, pass CF challenge, etc.)
+        print("\n──────────────────────────────────────────────────────────────────────────")
+        print("⚠️  Chrome is now open. Please do the following:")
+        print("   1) If you see a Trading 212 login page, enter your demo credentials.")
+        print("   2) Complete any 2FA or additional challenge until you see your dashboard.")
+        print("   3) Once you are fully logged in and you see your account dashboard,")
+        print("      come back to this terminal and press Enter to continue.")
+        print("──────────────────────────────────────────────────────────────────────────\n")
+        input("Press Enter after you have confirmed you’re on the Trading 212 dashboard…")
 
-        # Brief pause so any extra cookies can arrive
-        time.sleep(1)
-
+        # 4) Once the user confirms (presses Enter), grab all cookies
         selenium_cookies = driver.get_cookies()
         jar = requests.cookies.RequestsCookieJar()
         for c in selenium_cookies:
@@ -183,7 +180,8 @@ def fetch_cloudflare_cookies() -> requests.cookies.RequestsCookieJar:
                 domain=c["domain"],
                 path=c.get("path", "/")
             )
-        logger.debug(f"Extracted {len(selenium_cookies)} total cookies (includes cf_clearance).")
+
+        logger.debug(f"Extracted {len(selenium_cookies)} cookies (including cf_clearance).")
 
     finally:
         driver.quit()
