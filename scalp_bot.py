@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 # scalp_bot.py
-# A minimal “scalping” bot for Trading 212 (demo or live),
-# now using cloudscraper to bypass Cloudflare’s JS challenge.
+# A minimal Trading 212 scalping bot (demo or live) that uses Selenium to bypass Cloudflare.
 # ----------------------------------------------------------------------------
-# Dependencies:
-#   pip install cloudscraper python-dotenv
+# Dependencies (install once):
+#   pip install selenium webdriver-manager python-dotenv requests
 # ----------------------------------------------------------------------------
 
 import os
@@ -12,7 +11,11 @@ import sys
 import time
 import logging
 import argparse
-import cloudscraper
+import requests
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+from webdriver_manager.chrome import ChromeDriverManager
 from dotenv import load_dotenv
 
 # ----------------------------------------------------------------------------
@@ -25,12 +28,12 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ----------------------------------------------------------------------------
-# LOAD ENVIRONMENT (override any system‐level vars with .env)
+# LOAD ENVIRONMENT (override any system vars with .env)
 # ----------------------------------------------------------------------------
 load_dotenv(override=True)
 
 # ----------------------------------------------------------------------------
-# SANITY: show CWD & files so you can confirm .env is actually being loaded
+# SANITY: print CWD & files to confirm .env is in the same folder
 # ----------------------------------------------------------------------------
 cwd = os.getcwd()
 logger.debug(f"Current working directory: {cwd!r}")
@@ -47,10 +50,10 @@ if not _raw_key:
     logger.error("T212_API_KEY is not set or is empty. Please add it to your .env file.")
     sys.exit(1)
 
-# Strip out any non-Latin-1 characters (e.g. stray “…”)
+# Strip out any non-Latin-1 characters (e.g. “…”)
 T212_API_KEY = _raw_key.encode("utf-8", "ignore").decode("latin-1", "ignore")
 if T212_API_KEY != _raw_key:
-    logger.warning("Your T212_API_KEY contained non-ASCII characters; they have been stripped out.")
+    logger.warning("Your T212_API_KEY contained non-ASCII/strange characters; they have been stripped out.")
 if not T212_API_KEY:
     logger.error("After sanitization, T212_API_KEY is empty. Please double-check your .env.")
     sys.exit(1)
@@ -81,40 +84,6 @@ logger.debug(f"T212_ENV (normalized) = {repr(T212_ENV)}")
 logger.debug(f"BASE_URL = {repr(BASE_URL)}")
 
 # ----------------------------------------------------------------------------
-# CREATE CLOUDSCRAPER CLIENT (handles Cloudflare’s JS challenge automatically)
-# ----------------------------------------------------------------------------
-scraper = cloudscraper.create_scraper(
-    # Tell cloudscraper to reuse typical browser headers
-    browser={
-        "custom": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                  "AppleWebKit/537.36 (KHTML, like Gecko) "
-                  "Chrome/114.0.0.0 Safari/537.36"
-    }
-)
-
-# ----------------------------------------------------------------------------
-# BUILD HEADERS (merge into cloudscraper instance so all requests include them)
-# ----------------------------------------------------------------------------
-COMMON_HEADERS = {
-    # 1) Trading 212 Bearer token (must be Latin-1/ASCII only)
-    "Authorization": f"Bearer {T212_API_KEY}",
-
-    # 2) Standard API headers
-    "Content-Type": "application/json",
-    "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
-
-    # 3) Browser/Cloudflare headers
-    "Host": f"{T212_ENV}.trading212.com",
-    "Origin": f"https://{T212_ENV}.trading212.com",
-    "Referer": f"https://{T212_ENV}.trading212.com/",
-    "Connection": "keep-alive",
-}
-
-scraper.headers.update(COMMON_HEADERS)
-
-# ----------------------------------------------------------------------------
 # FALLBACKS (pull from .env or use defaults)
 # ----------------------------------------------------------------------------
 DEFAULT_SYMBOL     = os.getenv("SYMBOL", "AAPL").strip().upper()
@@ -129,39 +98,120 @@ def safe_sleep(seconds: float):
     time.sleep(seconds)
 
 # ----------------------------------------------------------------------------
-# INITIALIZE CLOUDFLARE SESSION (GET homepage to get cf_clearance cookie)
+# STEP 1: Use Selenium to “solve” Cloudflare and grab cookies
 # ----------------------------------------------------------------------------
-def init_cloudflare_session():
-    homepage = f"{BASE_URL}/"
-    logger.debug(f"Initializing Cloudflare session via GET {homepage}")
+def fetch_cloudflare_cookies() -> requests.cookies.RequestsCookieJar:
+    """
+    1) Launch a headless Chrome via Selenium.
+    2) Navigate to BASE_URL (which is either demo.trading212.com or api.trading212.com).
+    3) Wait until the page finishes loading (Cloudflare challenge solved).
+    4) Extract all cookies from the Chrome session, convert to a requests‐compatible jar,
+       and return it. Then quit the browser.
+    """
+    logger.info("Starting headless Chrome (Selenium) to solve Cloudflare...")
+
+    chrome_options = Options()
+    chrome_options.add_argument("--headless")
+    chrome_options.add_argument("--disable-gpu")
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--window-size=1200,800")
+    # Spoof a real browser UA
+    chrome_options.add_argument(
+        "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/114.0.0.0 Safari/537.36"
+    )
+
+    # 1) Start the ChromeDriver
+    driver = webdriver.Chrome(
+        ChromeDriverManager().install(),
+        options=chrome_options
+    )
+
     try:
-        r = scraper.get(homepage, timeout=15)
-    except Exception as e:
-        logger.error(f"Could not reach {homepage}: {e}")
-        sys.exit(1)
+        homepage = f"{BASE_URL}/"
+        logger.debug(f"Selenium → GET {homepage}")
+        driver.get(homepage)
 
-    logger.debug(f"→ HTTP {r.status_code} on {homepage}")
-    if r.status_code not in (200, 302):
-        # 302 sometimes happens if Cloudflare immediately redirects to login
-        logger.warning(f"Got HTTP {r.status_code} while fetching homepage; you may still be blocked.")
-    # After this GET, cloudscraper automatically stores the cf_clearance cookie if the JS challenge is passed.
+        # 2) Wait up to 15 seconds for the page’s <body> to become “complete.”
+        #    This implicitly waits until Cloudflare’s JS challenge finishes.
+        driver.implicitly_wait(15)
+
+        # Optionally: if there’s a login form or some visible element, wait for it:
+        #    WebDriverWait(driver, 15).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+
+        time.sleep(2)  # give it a moment for any redirects to finish
+
+        logger.debug("Selenium: page loaded, extracting cookies now...")
+
+        selenium_cookies = driver.get_cookies()
+        jar = requests.cookies.RequestsCookieJar()
+        for c in selenium_cookies:
+            # c is a dict like: {'name': 'cf_clearance', 'value': '...', 'domain': 'demo.trading212.com', ...}
+            jar.set(
+                name=c["name"],
+                value=c["value"],
+                domain=c["domain"],
+                path=c.get("path", "/")
+            )
+        logger.debug(f"Extracted {len(selenium_cookies)} cookies from Selenium (including Cloudflare).")
+    finally:
+        driver.quit()
+
+    return jar
 
 # ----------------------------------------------------------------------------
-# SEARCH INSTRUMENT (using /rest/v2 for both demo & live)
+# STEP 2: Build a normal requests.Session() using those cookies + browser headers
 # ----------------------------------------------------------------------------
-def search_instrument(symbol: str, asset_type: str = "EQUITY") -> dict:
+def build_api_session(cf_cookies: requests.cookies.RequestsCookieJar) -> requests.Session:
+    """
+    Create a requests.Session() and inject all the Cloudflare cookies so that subsequent
+    calls to demo.trading212.com (or api.trading212.com) are not blocked.
+    """
+    session = requests.Session()
+    session.cookies.update(cf_cookies)
+
+    # Put in headers that mimic a real browser + Trading 212’s expected API headers:
+    session.headers.update({
+        # 1) Trading 212 Bearer token
+        "Authorization": f"Bearer {T212_API_KEY}",
+
+        # 2) Content negotiators
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+
+        # 3) Browser/Cloudflare headers
+        "Host": f"{T212_ENV}.trading212.com",
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/114.0.0.0 Safari/537.36"
+        ),
+        "Origin": f"https://{T212_ENV}.trading212.com",
+        "Referer": f"https://{T212_ENV}.trading212.com/",
+        "Connection": "keep-alive",
+    })
+
+    return session
+
+# ----------------------------------------------------------------------------
+# STEP 3: Now write the helper functions that use `session` for the Trading 212 REST calls
+# ----------------------------------------------------------------------------
+def search_instrument(session: requests.Session, symbol: str, asset_type: str = "EQUITY") -> dict:
     """
     POST {BASE_URL}/rest/v2/instruments/search
-      JSON: {"query": symbol, "assetTypes": [asset_type]}
-    Using the same cloudscraper client (with cookies), so Cloudflare won’t block.
-    Returns first matching instrument JSON or raises on error.
+      JSON = {"query": symbol, "assetTypes": [asset_type]}
+    Returns the first matching instrument JSON (raises if non-200).
     """
     url = f"{BASE_URL}/rest/v2/instruments/search"
     payload = {"query": symbol, "assetTypes": [asset_type]}
 
     logger.debug(f"search_instrument: POST {url} with payload={payload}")
     try:
-        r = scraper.post(url, json=payload, timeout=15)
+        r = session.post(url, json=payload, timeout=15)
     except Exception as e:
         raise RuntimeError(f"search_instrument(): Request failed: {e}")
 
@@ -176,18 +226,15 @@ def search_instrument(symbol: str, asset_type: str = "EQUITY") -> dict:
 
     return hits[0]
 
-# ----------------------------------------------------------------------------
-# GET MARKET QUOTE
-# ----------------------------------------------------------------------------
-def get_market_quote(instrument_id: str) -> dict:
+def get_market_quote(session: requests.Session, instrument_id: str) -> dict:
     """
     GET {BASE_URL}/api/v1/quotes/instrument/{instrument_id}
-    Returns {"bid": float, "ask": float, "last": float, …} or raises on error.
+    Returns {"bid": float, "ask": float, "last": float, …} (raises if non-200).
     """
     url = f"{BASE_URL}/api/v1/quotes/instrument/{instrument_id}"
     logger.debug(f"get_market_quote: GET {url}")
     try:
-        r = scraper.get(url, timeout=15)
+        r = session.get(url, timeout=15)
     except Exception as e:
         raise RuntimeError(f"get_market_quote(): Request failed: {e}")
 
@@ -203,20 +250,17 @@ def get_market_quote(instrument_id: str) -> dict:
         "timestamp": d.get("timestamp")
     }
 
-# ----------------------------------------------------------------------------
-# PLACE MARKET ORDER
-# ----------------------------------------------------------------------------
-def place_market_order(instrument_id: str, side: str, size: float, currency: str = None) -> dict:
+def place_market_order(session: requests.Session, instrument_id: str, side: str, size: float, currency: str = None) -> dict:
     """
     POST {BASE_URL}/api/v1/orders
-      JSON: {
+      JSON = {
         "instrumentId": instrument_id,
         "orderType": "MARKET",
         "side": side,
-        "quantity": size
-        (optional) "currency": ...
+        "quantity": size,
+        (optional) "currency": currency
       }
-    Returns order JSON on HTTP 200/201 or raises on error.
+    Returns order JSON on HTTP 200/201 (raises otherwise).
     """
     url = f"{BASE_URL}/api/v1/orders"
     payload = {
@@ -230,7 +274,7 @@ def place_market_order(instrument_id: str, side: str, size: float, currency: str
 
     logger.debug(f"place_market_order: POST {url} with payload={payload}")
     try:
-        r = scraper.post(url, json=payload, timeout=15)
+        r = session.post(url, json=payload, timeout=15)
     except Exception as e:
         raise RuntimeError(f"place_market_order(): Request failed: {e}")
 
@@ -241,20 +285,20 @@ def place_market_order(instrument_id: str, side: str, size: float, currency: str
     return r.json()
 
 # ----------------------------------------------------------------------------
-# MAIN SCALP CYCLE
+# STEP 4: The main “scalp_cycle” logic (unchanged thresholds, etc.)
 # ----------------------------------------------------------------------------
-def scalp_cycle(symbol: str, size: float, asset_type: str):
+def scalp_cycle(session: requests.Session, symbol: str, size: float, asset_type: str):
     """
-    1) Search instrument (via /rest/v2/instruments/search)
-    2) Get current bid/ask/last (via /api/v1/quotes/…)
-    3) If ask ≤ 0.998×last → BUY; elif bid ≥ 1.002×last → SELL; otherwise → skip.
+    1) search_instrument → get instrumentId
+    2) get_market_quote → get bid/ask/last
+    3) if ask ≤ 0.998×last → buy; elif bid ≥ 1.002×last → sell; else do nothing.
     """
-    inst = search_instrument(symbol, asset_type)
+    inst = search_instrument(session, symbol, asset_type)
     inst_id = inst.get("instrumentId")
     name    = inst.get("symbol", symbol)
     logger.info(f"Found instrument: {name} (instrumentId={inst_id})")
 
-    quote = get_market_quote(inst_id)
+    quote = get_market_quote(session, inst_id)
     bid   = quote["bid"]
     ask   = quote["ask"]
     last  = quote["last"]
@@ -266,11 +310,11 @@ def scalp_cycle(symbol: str, size: float, asset_type: str):
 
     if ask <= target_buy:
         logger.info(f"→ PLACING BUY MARKET ORDER @ size={size}")
-        result = place_market_order(inst_id, side="BUY", size=size)
+        result = place_market_order(session, inst_id, side="BUY", size=size)
         logger.info(f"BUY RESULT: {result}")
     elif bid >= target_sell:
         logger.info(f"→ PLACING SELL MARKET ORDER @ size={size}")
-        result = place_market_order(inst_id, side="SELL", size=size)
+        result = place_market_order(session, inst_id, side="SELL", size=size)
         logger.info(f"SELL RESULT: {result}")
     else:
         logger.info("No scalp opportunity right now. Skipping order.")
@@ -311,13 +355,16 @@ def main():
 
     logger.info(f"Starting scalp_bot (Mode={atype}), symbol={symbol}, size={size}, interval={interval}s")
 
-    # 1) First, “wake up” Cloudflare by visiting the homepage:
-    init_cloudflare_session()
+    # ─── Use Selenium+Chrome to solve Cloudflare’s JS challenge and grab cookies ───
+    cf_cookies = fetch_cloudflare_cookies()
 
-    # 2) Then enter the scalping loop:
+    # ─── Build a normal requests.Session() with those cookies + browser headers ───
+    session = build_api_session(cf_cookies)
+
+    # ─── Enter the scalp loop ──────────────────────────────────────────────────
     try:
         while True:
-            scalp_cycle(symbol, size, atype)
+            scalp_cycle(session, symbol, size, atype)
             safe_sleep(interval)
     except KeyboardInterrupt:
         logger.info("Interrupted by user; shutting down.")
