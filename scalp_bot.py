@@ -104,56 +104,74 @@ def safe_sleep(seconds: float):
 # STEP 1: Use Selenium to “solve” Cloudflare and grab cookies
 # ----------------------------------------------------------------------------
 
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.common.exceptions import TimeoutException
-
 def fetch_cloudflare_cookies() -> requests.cookies.RequestsCookieJar:
     """
-    1) Launch a headless Chrome via Selenium.
+    1) Launch a “visible” (non-headless) Chrome via Selenium, with anti-detection switches.
     2) Navigate to BASE_URL (demo.trading212.com or api.trading212.com).
-    3) Wait until Cloudflare’s JS challenge sets “cf_clearance” (or timeout).
-    4) Extract all cookies (including cf_clearance) into a RequestsCookieJar.
-    5) Quit the browser and return that jar.
+    3) Wait (up to 15s) for the "cf_clearance" cookie to appear.
+    4) Once found, extract all cookies (including cf_clearance) into a RequestsCookieJar.
+    5) Quit Chrome and return that jar. If cf_clearance never appears, exit early.
     """
-    logger.info("Starting headless Chrome (Selenium) to solve Cloudflare...")
+    logger.info("Starting visible Chrome (Selenium) to solve Cloudflare…")
 
     chrome_options = Options()
-    chrome_options.add_argument("--headless")
+    # ── Remove --headless so we run a real browser window ──────────────────────────
+    # chrome_options.add_argument("--headless")
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--window-size=1200,800")
+
+    # Avoid “HeadlessChrome” in the User-Agent header:
     chrome_options.add_argument(
         "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/114.0.0.0 Safari/537.36"
     )
 
-    # Create a Service with the correct ChromeDriver binary
+    # Anti-automation flags (same as before)
+    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    chrome_options.add_experimental_option("useAutomationExtension", False)
+    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+
+    # Install or locate the matching ChromeDriver
     service = Service(ChromeDriverManager().install())
+
+    # Launch Chrome (visible window)
     driver = webdriver.Chrome(service=service, options=chrome_options)
 
     try:
+        # Inject JS to hide webdriver flag
+        driver.execute_cdp_cmd(
+            "Page.addScriptToEvaluateOnNewDocument",
+            {
+                "source": """
+                    Object.defineProperty(navigator, 'webdriver', {
+                      get: () => undefined
+                    });
+                """
+            }
+        )
+
         homepage = f"{BASE_URL}/"
         logger.debug(f"Selenium → GET {homepage}")
         driver.get(homepage)
 
-        # Now explicitly wait up to 15 seconds for the “cf_clearance” cookie to appear
+        # Wait up to 15 seconds for Cloudflare’s “cf_clearance” cookie
         try:
             WebDriverWait(driver, 15).until(
                 lambda d: d.get_cookie("cf_clearance") is not None
             )
-            logger.debug("Cloudflare clearance cookie appeared.")
+            logger.debug("✅ Cloudflare clearance cookie detected.")
         except TimeoutException:
-            # After 15s, still no cf_clearance? Bail out so we know it’s blocked/failed.
             logger.error(
-                "Timed out while waiting for Cloudflare clearance cookie. "
-                "Are you geo-blocked or behind a strict VPN? Exiting."
+                "❌ Timed out waiting for Cloudflare clearance cookie. "
+                "Perhaps your IP/VPN is blocked or the challenge failed."
             )
             driver.quit()
             sys.exit(1)
 
-        # Give it a small extra moment to ensure all cookies are populated
+        # Brief pause so any extra cookies can arrive
         time.sleep(1)
 
         selenium_cookies = driver.get_cookies()
@@ -165,12 +183,12 @@ def fetch_cloudflare_cookies() -> requests.cookies.RequestsCookieJar:
                 domain=c["domain"],
                 path=c.get("path", "/")
             )
-        logger.debug(f"Extracted {len(selenium_cookies)} cookies from Selenium (includes cf_clearance).")
+        logger.debug(f"Extracted {len(selenium_cookies)} total cookies (includes cf_clearance).")
+
     finally:
         driver.quit()
 
     return jar
-
 
 # ----------------------------------------------------------------------------
 # STEP 2: Build a normal requests.Session() using those cookies + browser headers
