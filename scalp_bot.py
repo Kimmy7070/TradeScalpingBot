@@ -9,10 +9,12 @@
 import os
 import sys
 import time
+import types
 import logging
 import argparse
 import requests
-import undetected_chromedriver as uc
+import types 
+from packaging.version import Version as LooseVersion
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.support.ui import WebDriverWait
@@ -20,6 +22,17 @@ from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.common.by import By
 from webdriver_manager.chrome import ChromeDriverManager
 from dotenv import load_dotenv
+
+# ─── Monkey‐patch distutils.version.LooseVersion for Python 3.12+ ─────────────
+
+distutils_version = types.SimpleNamespace(LooseVersion=LooseVersion)
+sys.modules["distutils"] = types.SimpleNamespace(version=distutils_version)
+sys.modules["distutils.version"] = distutils_version
+
+# ─── Now it’s safe to import undetected_chromedriver ───────────────────────────
+
+import undetected_chromedriver as uc
+from selenium.webdriver.chrome.options import Options
 
 # ----------------------------------------------------------------------------
 # SETUP: Logging
