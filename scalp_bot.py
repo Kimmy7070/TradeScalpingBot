@@ -13,7 +13,10 @@ import logging
 import argparse
 import requests
 from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.common.by import By
 from webdriver_manager.chrome import ChromeDriverManager
 from dotenv import load_dotenv
@@ -100,13 +103,17 @@ def safe_sleep(seconds: float):
 # ----------------------------------------------------------------------------
 # STEP 1: Use Selenium to “solve” Cloudflare and grab cookies
 # ----------------------------------------------------------------------------
+
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.common.exceptions import TimeoutException
+
 def fetch_cloudflare_cookies() -> requests.cookies.RequestsCookieJar:
     """
     1) Launch a headless Chrome via Selenium.
-    2) Navigate to BASE_URL (which is either demo.trading212.com or api.trading212.com).
-    3) Wait until the page finishes loading (Cloudflare challenge solved).
-    4) Extract all cookies from the Chrome session, convert to a requests‐compatible jar,
-       and return it. Then quit the browser.
+    2) Navigate to BASE_URL (demo.trading212.com or api.trading212.com).
+    3) Wait until Cloudflare’s JS challenge sets “cf_clearance” (or timeout).
+    4) Extract all cookies (including cf_clearance) into a RequestsCookieJar.
+    5) Quit the browser and return that jar.
     """
     logger.info("Starting headless Chrome (Selenium) to solve Cloudflare...")
 
@@ -116,50 +123,54 @@ def fetch_cloudflare_cookies() -> requests.cookies.RequestsCookieJar:
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--window-size=1200,800")
-    # Spoof a real browser UA
     chrome_options.add_argument(
         "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/114.0.0.0 Safari/537.36"
     )
 
-    # 1) Start the ChromeDriver
-    driver = webdriver.Chrome(
-        ChromeDriverManager().install(),
-        options=chrome_options
-    )
+    # Create a Service with the correct ChromeDriver binary
+    service = Service(ChromeDriverManager().install())
+    driver = webdriver.Chrome(service=service, options=chrome_options)
 
     try:
         homepage = f"{BASE_URL}/"
         logger.debug(f"Selenium → GET {homepage}")
         driver.get(homepage)
 
-        # 2) Wait up to 15 seconds for the page’s <body> to become “complete.”
-        #    This implicitly waits until Cloudflare’s JS challenge finishes.
-        driver.implicitly_wait(15)
+        # Now explicitly wait up to 15 seconds for the “cf_clearance” cookie to appear
+        try:
+            WebDriverWait(driver, 15).until(
+                lambda d: d.get_cookie("cf_clearance") is not None
+            )
+            logger.debug("Cloudflare clearance cookie appeared.")
+        except TimeoutException:
+            # After 15s, still no cf_clearance? Bail out so we know it’s blocked/failed.
+            logger.error(
+                "Timed out while waiting for Cloudflare clearance cookie. "
+                "Are you geo-blocked or behind a strict VPN? Exiting."
+            )
+            driver.quit()
+            sys.exit(1)
 
-        # Optionally: if there’s a login form or some visible element, wait for it:
-        #    WebDriverWait(driver, 15).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
-
-        time.sleep(2)  # give it a moment for any redirects to finish
-
-        logger.debug("Selenium: page loaded, extracting cookies now...")
+        # Give it a small extra moment to ensure all cookies are populated
+        time.sleep(1)
 
         selenium_cookies = driver.get_cookies()
         jar = requests.cookies.RequestsCookieJar()
         for c in selenium_cookies:
-            # c is a dict like: {'name': 'cf_clearance', 'value': '...', 'domain': 'demo.trading212.com', ...}
             jar.set(
                 name=c["name"],
                 value=c["value"],
                 domain=c["domain"],
                 path=c.get("path", "/")
             )
-        logger.debug(f"Extracted {len(selenium_cookies)} cookies from Selenium (including Cloudflare).")
+        logger.debug(f"Extracted {len(selenium_cookies)} cookies from Selenium (includes cf_clearance).")
     finally:
         driver.quit()
 
     return jar
+
 
 # ----------------------------------------------------------------------------
 # STEP 2: Build a normal requests.Session() using those cookies + browser headers
