@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 # scalp_bot.py
-# A minimal “scalping” bot for Trading 212 (demo or live).
+# A minimal “scalping” bot for Trading 212 (demo or live),
+# now with browser-style headers to avoid Cloudflare’s Access Denied.
 # ----------------------------------------------------------------------------
-# Requirements: pip install python‐dotenv requests
+# Requirements: pip install python-dotenv requests
 # ----------------------------------------------------------------------------
 
 import os
@@ -23,18 +24,29 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ----------------------------------------------------------------------------
-# LOAD ENVIRONMENT VARIABLES (AND SANITIZE API KEY)
+# LOAD ENVIRONMENT (override any system‐level vars with .env)
 # ----------------------------------------------------------------------------
-# 1. Attempt to load a .env file from the current working directory.
-load_dotenv(override=True)  
+load_dotenv(override=True)
 
-# 2. Read T212_API_KEY, strip whitespace, then force‐sanitize to Latin-1/ASCII.
-_raw_key = os.getenv("T212_API_KEY", "").strip()
+# ----------------------------------------------------------------------------
+# SANITY: show CWD and files to confirm .env is being picked up
+# ----------------------------------------------------------------------------
+cwd = os.getcwd()
+logger.debug(f"Current working directory: {cwd!r}")
+logger.debug(f"Files in CWD: {os.listdir(cwd)}")
+
+# ----------------------------------------------------------------------------
+# READ & SANITIZE T212_API_KEY
+# ----------------------------------------------------------------------------
+_raw_key = os.getenv("T212_API_KEY", "")
+logger.debug(f"Raw T212_API_KEY from env: {repr(_raw_key)}")
+
+_raw_key = _raw_key.strip()
 if not _raw_key:
-    logger.error("T212_API_KEY is not set. Please add it to your .env file.")
+    logger.error("T212_API_KEY is not set or is empty. Please add it to your .env file.")
     sys.exit(1)
 
-# Remove any non-Latin-1 characters (e.g. “…”). Trading 212 HTTP headers must be Latin-1.
+# Strip any non-Latin-1 characters (e.g. “…”)
 T212_API_KEY = _raw_key.encode("utf-8", "ignore").decode("latin-1", "ignore")
 if T212_API_KEY != _raw_key:
     logger.warning("Your T212_API_KEY contained non-ASCII characters; they have been stripped out.")
@@ -42,62 +54,79 @@ if not T212_API_KEY:
     logger.error("After sanitization, T212_API_KEY is empty. Please double-check your .env.")
     sys.exit(1)
 
-# 3. Read T212_ENV, and print exactly what was read (for debugging).
-_raw_env = os.getenv("T212_ENV", "").strip()
-logger.debug(f"T212_ENV (raw from environment) = {repr(_raw_env)}")
+# ----------------------------------------------------------------------------
+# READ & VALIDATE T212_ENV (“demo” or “live”)
+# ----------------------------------------------------------------------------
+_raw_env = os.getenv("T212_ENV", "")
+logger.debug(f"Raw T212_ENV from env: {repr(_raw_env)}")
 
-# If nothing was in the environment, default to "demo"
+_raw_env = _raw_env.strip()
 if not _raw_env:
-    logger.debug("T212_ENV was empty; defaulting to 'demo'.")
+    logger.debug("T212_ENV was empty—defaulting to 'demo'.")
     _raw_env = "demo"
 
 T212_ENV = _raw_env.lower()
 if T212_ENV not in ("demo", "live"):
-    logger.error("T212_ENV must be either 'demo' or 'live' (case-insensitive).")
+    logger.error("T212_ENV must be exactly 'demo' or 'live' (case-insensitive).")
     sys.exit(1)
 
-# Determine the correct BASE_URL
+# Set the correct base URL
 if T212_ENV == "live":
     BASE_URL = "https://api.trading212.com"
 else:
     BASE_URL = "https://demo.trading212.com"
 
-logger.debug(f"T212_ENV (normalized) = '{T212_ENV}'")
-logger.debug(f"BASE_URL = '{BASE_URL}'")
+logger.debug(f"T212_ENV (normalized) = {repr(T212_ENV)}")
+logger.debug(f"BASE_URL = {repr(BASE_URL)}")
 
-# 4. Build a HEADERS dict that only contains Latin-1/ASCII
+# ----------------------------------------------------------------------------
+# BUILD HEADERS (now include User-Agent, Origin, Referer to bypass Cloudflare)
+# ----------------------------------------------------------------------------
+
 HEADERS = {
     "Authorization": f"Bearer {T212_API_KEY}",
     "Content-Type": "application/json",
-    "Accept": "application/json",
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.9",
+
+    # Cloudflare sees these and (usually) lets the request through:
+    "Host": f"{T212_ENV}.trading212.com",
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/114.0.0.0 Safari/537.36"
+    ),
+    "Origin": f"https://{T212_ENV}.trading212.com",
+    "Referer": f"https://{T212_ENV}.trading212.com/",
+    "Connection": "keep-alive",
 }
 
 # ----------------------------------------------------------------------------
-# DEFAULTS (can also be overridden via .env)
+# DEFAULTS FROM .env (OR FALLBACKS)
 # ----------------------------------------------------------------------------
-DEFAULT_SYMBOL      = os.getenv("SYMBOL", "AAPL").strip().upper()
-DEFAULT_SIZE        = float(os.getenv("SIZE", "1.0"))
-DEFAULT_ASSET_TYPE  = os.getenv("ASSET_TYPE", "EQUITY").strip().upper()
+DEFAULT_SYMBOL     = os.getenv("SYMBOL", "AAPL").strip().upper()
+DEFAULT_SIZE       = float(os.getenv("SIZE", "1.0"))
+DEFAULT_ASSET_TYPE = os.getenv("ASSET_TYPE", "EQUITY").strip().upper()
 
 # ----------------------------------------------------------------------------
-# HELPERS
+# UTILITY: Sleep with debug log
 # ----------------------------------------------------------------------------
 def safe_sleep(seconds: float):
-    """Sleep for the given number of seconds, with a debug log."""
     logger.debug(f"Sleeping for {seconds} second(s)…")
     time.sleep(seconds)
 
 # ----------------------------------------------------------------------------
-# SEARCH INSTRUMENT
+# SEARCH INSTRUMENT (use /rest/v2 for demo/live; now with updated HEADERS)
 # ----------------------------------------------------------------------------
 def search_instrument(symbol: str, asset_type: str = "EQUITY") -> dict:
     """
-    POST /api/v1/instruments/search
-      payload: {"query": symbol, "assetTypes": [asset_type]}
-    Returns the first matching instrument JSON.
-    Raises RuntimeError if HTTP ≠200 or no hits.
+    ────────────────────────────────────────────────────────────────────────────
+    POST {BASE_URL}/rest/v2/instruments/search
+      JSON body: { "query": symbol, "assetTypes": [asset_type] }
+    Requires browser headers to avoid Cloudflare blocking.
+    Returns the first matching instrument JSON on HTTP 200. Raises otherwise.
     """
-    url = f"{BASE_URL}/api/v1/instruments/search"
+    url = f"{BASE_URL}/rest/v2/instruments/search"
     payload = {"query": symbol, "assetTypes": [asset_type]}
 
     logger.debug(f"search_instrument: POST {url} with payload={payload}")
@@ -113,17 +142,17 @@ def search_instrument(symbol: str, asset_type: str = "EQUITY") -> dict:
     data = r.json()
     hits = data.get("instruments", [])
     if not hits:
-        raise RuntimeError(f"No instruments found matching '{symbol}' (type={asset_type}).")
+        raise RuntimeError(f"No instruments found matching '{symbol}' (assetType={asset_type}).")
 
     return hits[0]
 
 # ----------------------------------------------------------------------------
-# GET MARKET QUOTE
+# GET MARKET QUOTE (unchanged endpoint; demo/live support /api/v1/quotes/…)
 # ----------------------------------------------------------------------------
 def get_market_quote(instrument_id: str) -> dict:
     """
-    GET /api/v1/quotes/instrument/{instrumentId}
-    Returns a dict with at least {"bid": float, "ask": float, "last": float, "timestamp": …}.
+    GET {BASE_URL}/api/v1/quotes/instrument/{instrument_id}
+    Returns {"bid": float, "ask": float, "last": float, …} on HTTP 200. Raises otherwise.
     """
     url = f"{BASE_URL}/api/v1/quotes/instrument/{instrument_id}"
     logger.debug(f"get_market_quote: GET {url}")
@@ -145,19 +174,19 @@ def get_market_quote(instrument_id: str) -> dict:
     }
 
 # ----------------------------------------------------------------------------
-# PLACE MARKET ORDER
+# PLACE MARKET ORDER (unchanged endpoint; demo/live support /api/v1/orders)
 # ----------------------------------------------------------------------------
 def place_market_order(instrument_id: str, side: str, size: float, currency: str = None) -> dict:
     """
-    POST /api/v1/orders
-      payload: {
+    POST {BASE_URL}/api/v1/orders
+      JSON body: {
         "instrumentId": str,
         "orderType": "MARKET",
         "side": "BUY" or "SELL",
         "quantity": float,
-        (optional) "currency": "USD"
+        (optional) "currency": str
       }
-    Returns the JSON response on success (HTTP 200 or 201). Raises otherwise.
+    Returns JSON on HTTP 200/201. Raises otherwise.
     """
     url = f"{BASE_URL}/api/v1/orders"
     payload = {
@@ -182,15 +211,13 @@ def place_market_order(instrument_id: str, side: str, size: float, currency: str
     return r.json()
 
 # ----------------------------------------------------------------------------
-# MAIN SCALP CYCLE
+# MAIN SCALP CYCLE (unchanged logic)
 # ----------------------------------------------------------------------------
 def scalp_cycle(symbol: str, size: float, asset_type: str):
     """
-    1) Search instrument by symbol
-    2) Get market quote
-    3) If “ask” ≤ target_buy_price → place BUY MARKET order
-       If “bid” ≥ target_sell_price → place SELL MARKET order
-       Else → no action.
+    1) Search instrument (via /rest/v2/instruments/search + browser headers)
+    2) Get current bid/ask (via /api/v1/quotes/…)
+    3) If ask ≤ 0.998×last → BUY; elif bid ≥ 1.002×last → SELL; otherwise → skip.
     """
     # 1) Search
     inst = search_instrument(symbol, asset_type)
@@ -206,15 +233,15 @@ def scalp_cycle(symbol: str, size: float, asset_type: str):
     logger.info(f"Market quote for {symbol}: bid={bid:.4f}, ask={ask:.4f}, last={last:.4f}")
 
     # 3) Simple threshold logic (customize as needed)
-    target_buy_price  = last * 0.998  # 0.2% below last
-    target_sell_price = last * 1.002  # 0.2% above last
-    logger.debug(f"Target buy @ {target_buy_price:.4f}, Target sell @ {target_sell_price:.4f}")
+    target_buy  = last * 0.998  # → buy if ask ≤ 99.8% of last
+    target_sell = last * 1.002  # → sell if bid ≥ 100.2% of last
+    logger.debug(f"Target buy @ {target_buy:.4f}, Target sell @ {target_sell:.4f}")
 
-    if ask <= target_buy_price:
+    if ask <= target_buy:
         logger.info(f"→ PLACING BUY MARKET ORDER @ size={size}")
         result = place_market_order(inst_id, side="BUY", size=size)
         logger.info(f"BUY RESULT: {result}")
-    elif bid >= target_sell_price:
+    elif bid >= target_sell:
         logger.info(f"→ PLACING SELL MARKET ORDER @ size={size}")
         result = place_market_order(inst_id, side="SELL", size=size)
         logger.info(f"SELL RESULT: {result}")
@@ -246,7 +273,7 @@ def main():
         "--interval", "-i",
         type=float,
         default=5.0,
-        help="Time in seconds to wait between scalp cycles (default: 5s)"
+        help="Seconds between scalp cycles (default: 5s)"
     )
     args = parser.parse_args()
 
