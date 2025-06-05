@@ -143,75 +143,41 @@ def safe_sleep(seconds: float):
 # STEP 1: Use Selenium to “solve” Cloudflare and grab cookies
 # ----------------------------------------------------------------------------
 
-def fetch_cloudflare_cookies() -> requests.cookies.RequestsCookieJar:
+def fetch_cloudflare_cookies():
     """
-    1) Launch a visible undetected-Chrome window (uc.Chrome) to avoid CF detecting Selenium.
-    2) Navigate to BASE_URL (demo.trading212.com).
-    3) Pause and let you manually log in and see your dashboard; press Enter when ready.
-    4) Immediately grab ALL cookies from Selenium and print them.
-    5) Bundle them into a RequestsCookieJar and return.
-    
-    This skips waiting for a specific 'cf_clearance' name, since T212 may use a different cookie name.
+    Launches an undetected-chromedriver browser and points it to the Trading 212 beta/practice URL.
+    Once the CF challenge is solved (you may have to log in and switch to Practice manually),
+    we grab the cookies and return them for use by `requests`.
     """
-    logger.info("Starting visible undetected-Chrome (uc.Chrome) to solve Cloudflare…")
+    chrome_options = uc.ChromeOptions()
+    chrome_options.headless = False  # so you can see & interact
+    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+    chrome_options.add_argument("--start-maximized")
 
-    # ─── Build ChromeOptions as before ─────────────────────────────────────────────
-    chrome_options = Options()
-    # (no --headless; we want to see the browser)
-    chrome_options.add_argument("--disable-gpu")
-    chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--disable-dev-shm-usage")
-    chrome_options.add_argument("--window-size=1200,800")
-    chrome_options.add_argument(
-        "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/114.0.0.0 Safari/537.36"
-    )
+    # ───────── Change starts here ─────────
+    # Instead of pointing at BASE_URL (root), go directly to /beta
+    cf_url = f"{BASE_URL}/beta"
+    # ───────── Change ends here ─────────
 
-    # Launch undetected_chromedriver
     driver = uc.Chrome(options=chrome_options)
+    driver.get(cf_url)
 
-    try:
-        homepage = f"{BASE_URL}/"
-        logger.debug(f"uc.Chrome → GET {homepage}")
-        driver.get(homepage)
-
-        # ─── Let the user handle login + CF challenge manually ─────────────────────────
-        print("\n──────────────────────────────────────────────────────────────────────────")
-        print("⚠️  A Chrome window (undetected) has opened. Please do the following:")
-        print("   1) If you see a Trading 212 login screen, enter your demo credentials.")
-        print("   2) Complete any 2FA or Cloudflare challenge until you see your dashboard.")
-        print("   3) Once the dashboard is fully visible (no more “Access Denied”),")
-        print("      return to this terminal and press Enter to continue.")
-        print("──────────────────────────────────────────────────────────────────────────\n")
-        input("Press Enter after you confirm you’re on the Trading 212 dashboard…")
-
-        # ─── Immediately grab ALL cookies (no waiting) ────────────────────────────────
-        selenium_cookies = driver.get_cookies()
-        if not selenium_cookies:
-            logger.error("⚠️ No cookies were found at login. Check that you saw the dashboard correctly.")
+    # Wait up to 60 seconds for CF clearance cookie to appear
+    timeout = 60
+    start = time.time()
+    while time.time() - start < timeout:
+        cookies = driver.get_cookies()
+        # Trading 212’s CF clearance cookie is usually named "__cf_bm" or "__cfduid"
+        if any(c["name"].startswith("__cf") for c in cookies):
+            # Convert Selenium cookies to a Requests‐style dict
+            cf_cookies = {c["name"]: c["value"] for c in cookies}
             driver.quit()
-            sys.exit(1)
+            return cf_cookies
+        time.sleep(1)
 
-        print("\n✅ Cookies after login (name → value):")
-        for c in selenium_cookies:
-            print(f"    • {c['name']} = {c['value']}")
-
-        # ─── Build a RequestsCookieJar from these cookies ────────────────────────────
-        jar = requests.cookies.RequestsCookieJar()
-        for c in selenium_cookies:
-            jar.set(
-                name=c["name"],
-                value=c["value"],
-                domain=c["domain"],
-                path=c.get("path", "/")
-            )
-        logger.debug(f"Extracted {len(selenium_cookies)} cookies from Selenium session.")
-
-    finally:
-        driver.quit()
-
-    return jar
+    driver.quit()
+    raise RuntimeError("❌ Timed out waiting for Cloudflare clearance cookie. "
+                       "Either CF challenge failed or your IP is blocked.")
 
 # ----------------------------------------------------------------------------
 # STEP 2: Build a normal requests.Session() using those cookies + browser headers
