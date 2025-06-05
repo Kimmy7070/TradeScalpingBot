@@ -16,7 +16,6 @@ import requests
 import types
 from packaging.version import Version as _PackagingVersion
 from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.common.by import By
@@ -24,25 +23,31 @@ from webdriver_manager.chrome import ChromeDriverManager
 from dotenv import load_dotenv
 
 # ─── Import distutils.version.LooseVersion for Python 3.12+ ──────────────────
+
 class LooseVersionShim:
     """
-    A thin wrapper around packaging.version.Version that exposes a .version tuple,
-    so that code expecting distutils.version.LooseVersion.version still works.
+    A thin wrapper around packaging.version.Version that exposes both:
+      - .version (tuple of release numbers) 
+      - .vstring (string form) 
+    so that undetected_chromedriver (which expects distutils.version.LooseVersion)
+    can use .version and .vstring without errors.
     """
     def __init__(self, v):
-        # v might already be a Version or a string; convert to packaging.Version
+        # If v is already a PackagingVersion, use it; otherwise parse from string
         if isinstance(v, _PackagingVersion):
             self._v = v
         else:
             self._v = _PackagingVersion(v)
-        # .release is a tuple of ints or strings; that satisfies .version
+        # .version: a tuple of ints (or strings) representing each release segment
         self.version = tuple(self._v.release)
+        # .vstring: the original version string (e.g. "114.0.5735.110")
+        self.vstring = str(self._v)
 
     def __str__(self):
-        return str(self._v)
+        return self.vstring
 
     def __repr__(self):
-        return f"LooseVersionShim('{str(self._v)}')"
+        return f"LooseVersionShim('{self.vstring}')"
 
 # ─── Monkey‐patch distutils.version.LooseVersion for Python 3.12+ ─────────────
 
