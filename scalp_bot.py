@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 # LOAD ENVIRONMENT VARIABLES (AND SANITIZE API KEY)
 # ----------------------------------------------------------------------------
 # 1. Attempt to load a .env file from the current working directory.
-load_dotenv()  
+load_dotenv(override=True)  
 
 # 2. Read T212_API_KEY, strip whitespace, then force‐sanitize to Latin-1/ASCII.
 _raw_key = os.getenv("T212_API_KEY", "").strip()
