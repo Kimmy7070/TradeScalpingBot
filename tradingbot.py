@@ -200,16 +200,28 @@ def build_api_session(cf_cookies: requests.cookies.RequestsCookieJar) -> request
     Create a requests.Session() and inject all the Cloudflare cookies so that subsequent
     calls to demo.trading212.com (or api.trading212.com) are not blocked.
     """
-    
+
+    # 1) Create a brand‐new Session
+    session = requests.Session()
+
+    # 2) For each cookie dict in cf_cookies, call session.cookies.set(...)
+    #    We do NOT use session.cookies.update(cf_cookies), because update() expects a
+    #    mapping of name->value, not a list of dicts.
     for c in cf_cookies:
+        # Prepare a “rest” dict only if the cookie is HttpOnly
+        rest_flags = {}
+        if c.get("httpOnly", False):
+            rest_flags["HttpOnly"] = True
+
         session.cookies.set(
             name=c["name"],
             value=c["value"],
-            domain=c.get("domain"),
+            domain=c.get("domain", None),
             path=c.get("path", "/"),
             secure=c.get("secure", False),
-            httponly=c.get("httpOnly", False)
+            rest=rest_flags
         )
+    
     #logger.debug(f"Injected {len(cf_cookies)} Cloudflare cookies into session.")
     #session = requests.Session()
     # Put in headers that mimic a real browser + Trading 212’s expected API headers:
