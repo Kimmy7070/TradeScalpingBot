@@ -146,46 +146,42 @@ def safe_sleep(seconds: float):
 
 def fetch_cloudflare_cookies() -> list:
     """
-    1) Launches an undetected_chromedriver browser so you can manually log in to Trading 212.
-    2) Once you press ENTER, grabs *all* cookies from both ".trading212.com" and "app.trading212.com".
-    3) Returns them as a list of dictionaries, exactly as driver.get_cookies() gives you.
+    1) Launch undetected_chromedriver so you can log in manually.
+    2) Once you press ENTER, grab every cookie (including those on app.trading212.com).
+    3) Return the list of cookie‐dicts.
     """
     print("▶▶▶ INFO: Launching Chrome so you can log in to Trading 212…")
-    # We reuse the same “chrome_profile” folder so you stay logged in between runs.
     chrome_profile = os.path.join(os.getcwd(), "chrome_profile")
     options = uc.ChromeOptions()
+    # reuse the same profile folder so you stay “logged in” between runs
     options.add_argument(f"--user-data-dir={chrome_profile}")
     driver = uc.Chrome(options=options)
 
     driver.get(BASE_URL)
     print("\n────────── WAIT FOR MANUAL LOGIN ──────────")
     print("  • In the Chrome window, log in to your Trading 212 account.")
-    print("  • Switch to your Practice/Demo account if needed.")
-    print("  • Once you see your PRACTICE portfolio page, press ENTER below.\n")
+    print("  • Switch to your Practice/Demo account.")
+    print("  • Once you see your PRACTICE portfolio, press ENTER here.\n")
     input("▶▶▶ Press ENTER once you’re fully logged in…")
 
-    # Now grab every cookie that the browser has for trading212.com (and app.trading212.com)
     all_cookies = driver.get_cookies()
     driver.quit()
-    print("▶▶▶ INFO: Chrome closed; retrieved", len(all_cookies), "cookies.")
+    print(f"▶▶▶ INFO: Chrome closed; retrieved {len(all_cookies)} cookies.\n")
     return all_cookies
 
-# ----------------------------------------------------------------------------
-# STEP 2: Build a normal requests.Session() using those cookies + browser headers
-# ----------------------------------------------------------------------------
 
 def build_api_session(cloudflare_cookies: list) -> requests.Session:
     """
-    Given a list of cookies (as dicts) fetched via Selenium, 
-    inject every one of them into a fresh requests.Session, *including*
-    those whose domain is "app.trading212.com" or ".trading212.com".
-    Then perform one GET to BASE_URL so that Cloudflare’s challenge can finalize.
-    Finally, return that ready-to-go session.
+    1) Inject every cookie exactly as Chrome saw it (including domains ".trading212.com"
+       and "app.trading212.com"). Use `rest={'HttpOnly': …}` so that HttpOnly flags are honored.
+    2) Immediately do one GET to BASE_URL, but with a full browser-style header set. This lets
+       Cloudflare finish its JS/redirect challenge and drop the final clearance tokens.
+    3) If that GET returns 200 and does NOT contain “Access Denied,” then we’re free to call any
+       /api/practice/... endpoint afterwards.
     """
     session = requests.Session()
 
-    # 1) Set every cookie exactly as Chrome saw it.
-    #    Remember: create_cookie expects HttpOnly to live inside rest={"HttpOnly":…}.
+    # 1) Inject every single cookie from Selenium into our requests.Session
     for c in cloudflare_cookies:
         rest_dict = {
             "HttpOnly": c.get("httpOnly", False),
@@ -200,31 +196,62 @@ def build_api_session(cloudflare_cookies: list) -> requests.Session:
             rest=rest_dict
         )
 
-    # 2) Force a “pass‐through” GET to BASE_URL. This lets Cloudflare’s JS/redirect run,
-    #    dropping any final clearance tokens (e.g. cf_clearance) into session.cookies.
+    # 2) Now set a full browser-style header block before we do the “pass-through” GET
+    session.headers.clear()
     session.headers.update({
+        # Mimic a standard Chrome UA
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
             "Chrome/115.0.0.0 Safari/537.36"
         ),
+        "Accept": (
+            "text/html,application/xhtml+xml,application/xml;"
+            "q=0.9,image/webp,image/apng,*/*;q=0.8"
+        ),
+        "Accept-Language": "en-US,en;q=0.9",
+        # Note: requests will automatically send “Accept-Encoding: gzip, deflate, br”
+        # so you don’t need to add it explicitly.
         "Referer": BASE_URL + "/",
-        "Origin": BASE_URL
+        "Origin": BASE_URL,
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-User": "?1",
+        "Sec-Fetch-Dest": "document",
+        "Upgrade-Insecure-Requests": "1",
     })
 
-    # By calling session.get(BASE_URL), we simulate a normal browser visit. 
-    # If Cloudflare still needed a JS challenge, this GET allows it to finalize.
+    # 3) Do one GET to BASE_URL so that Cloudflare’s JS challenge can finish.
+    #    If CF is satisfied, this will hand us back the normal PRACTICE portfolio HTML with HTTP 200.
     resp = session.get(BASE_URL, allow_redirects=True)
     if resp.status_code != 200 or b"Access Denied" in resp.content:
-        # If we still see “Access Denied,” it means CF didn’t like something –
-        # perhaps a missing cookie or a missing header. We bail out here so you can debug.
-        print("▶▶▶ ERROR: While ‘clearing’ Cloudflare, got status", resp.status_code)
+        print(f"▶▶▶ ERROR: Cloudflare challenge failed (GET {BASE_URL} returned {resp.status_code}).")
         print(" First 200 bytes of response:", resp.content[:200])
         raise RuntimeError("Failed to clear Cloudflare challenge on initial GET.")
 
-    # At this point, session.cookies should contain *all* of the necessary CF tokens.
+    # At this point, session.cookies now contains all CF clearance tokens (cf_clearance, etc.).
     return session
 
+
+def main():
+    # 1) Manually log in via undetected_chromedriver, grab cookies
+    cf_cookies = fetch_cloudflare_cookies()
+
+    # 2) Inject into requests.Session, finish CF challenge
+    session = build_api_session(cf_cookies)
+
+    # 3) Now that CF is happy, we can call any /api/practice endpoint. For example:
+    accounts_resp = session.get("https://demo.trading212.com/api/practice/v2/accounts")
+    if accounts_resp.status_code == 200:
+        print("▶▶▶ SUCCESS: Retrieved accounts:")
+        print(accounts_resp.json())
+    else:
+        print("▶▶▶ ERROR: /accounts returned", accounts_resp.status_code)
+        print(accounts_resp.text[:300])
+
+
+if __name__ == "__main__":
+    main()
 
 def main():
     # Step 1: launch Chrome, have user log in, collect cookies
@@ -418,6 +445,3 @@ def main():
     except Exception as e:
         logger.exception(f"Fatal error in main loop: {e}")
         sys.exit(1)
-
-if __name__ == "__main__":
-    main()
