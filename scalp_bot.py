@@ -1,3 +1,4 @@
+#time wated: 3 days
 #!/usr/bin/env python3
 # scalp_bot.py
 # A minimal Trading 212 scalping bot (demo or live) that uses Selenium to bypass Cloudflare.
