@@ -200,7 +200,16 @@ def build_api_session(cf_cookies: requests.cookies.RequestsCookieJar) -> request
     calls to demo.trading212.com (or api.trading212.com) are not blocked.
     """
     session = requests.Session()
-    session.cookies.update(cf_cookies)
+
+    for ck in cf_cookies:
+        session.cookies.set(
+        name=ck.get("name"),
+        value=ck.get("value"),
+        domain=ck.get("domain", None),
+        path=ck.get("path", "/"),
+        secure=ck.get("secure", False),
+        rest={"HttpOnly": ck.get("httpOnly", False)}
+    )
 
     # Put in headers that mimic a real browser + Trading 212’s expected API headers:
     session.headers.update({
