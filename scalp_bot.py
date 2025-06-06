@@ -201,16 +201,6 @@ def build_api_session(cf_cookies: requests.cookies.RequestsCookieJar) -> request
     """
     session = requests.Session()
 
-    for ck in cf_cookies:
-        session.cookies.set(
-        name=ck.get("name"),
-        value=ck.get("value"),
-        domain=ck.get("domain", None),
-        path=ck.get("path", "/"),
-        secure=ck.get("secure", False),
-        rest={"HttpOnly": ck.get("httpOnly", False)}
-    )
-
     # Put in headers that mimic a real browser + Trading 212’s expected API headers:
     session.headers.update({
         # 1) Trading 212 Bearer token
@@ -233,6 +223,17 @@ def build_api_session(cf_cookies: requests.cookies.RequestsCookieJar) -> request
         "Referer": f"https://{T212_ENV}.trading212.com/",
         "Connection": "keep-alive",
     })
+
+    # Add the Cloudflare cookies to the session
+    for ck in cf_cookies:
+        session.cookies.set(
+        name=ck.get("name"),
+        value=ck.get("value"),
+        domain=ck.get("domain", None),
+        path=ck.get("path", "/"),
+        secure=ck.get("secure", False),
+        rest={"HttpOnly": ck.get("httpOnly", False)}
+    )
 
     return session
 
