@@ -144,54 +144,63 @@ def safe_sleep(seconds: float):
 # STEP 1: Use Selenium to “solve” Cloudflare and grab cookies
 # ----------------------------------------------------------------------------
 
-def fetch_cloudflare_cookies() -> list:
-    """
-    1) Launch undetected_chromedriver so you can log in manually.
-    2) Once you press ENTER, grab every cookie (including those on app.trading212.com).
-    3) Return the list of cookie‐dicts.
-    """
-    print("▶▶▶ INFO: Launching Chrome so you can log in to Trading 212…")
-    chrome_profile = os.path.join(os.getcwd(), "chrome_profile")
+BASE_URL = "https://demo.trading212.com"
+T212_API_KEY = os.getenv("T212_API_KEY")
+T212_ENV = os.getenv("T212_ENV", "demo").lower()
+
+
+def fetch_cloudflare_cookies():
+    logging.debug("Entering fetch_cloudflare_cookies()")
     options = uc.ChromeOptions()
-    # reuse the same profile folder so you stay “logged in” between runs
-    options.add_argument(f"--user-data-dir={chrome_profile}")
+    options.add_argument(f"--user-data-dir={os.getcwd()}/chrome_profile")
+    logging.debug(f"Chrome profile path: {os.getcwd()}/chrome_profile")
+
+    logging.debug("Starting undetected chromedriver... this may take a moment")
     driver = uc.Chrome(options=options)
 
-    driver.get(BASE_URL)
-    print("\n────────── WAIT FOR MANUAL LOGIN ──────────")
-    print("  • In the Chrome window, log in to your Trading 212 account.")
-    print("  • Switch to your Practice/Demo account.")
-    print("  • Once you see your PRACTICE portfolio, press ENTER here.\n")
-    input("▶▶▶ Press ENTER once you’re fully logged in…")
+    try:
+        logging.debug(f"Navigating to {BASE_URL}")
+        driver.get(BASE_URL)
+        logging.info("Make sure you log in to Trading212 in the Chrome window now...")
+        input("▶▶▶ Press ENTER once you’re logged in and see your Practice portfolio…")
 
-    all_cookies = driver.get_cookies()
-    driver.quit()
-    print(f"▶▶▶ INFO: Chrome closed; retrieved {len(all_cookies)} cookies.\n")
-    return all_cookies
+        logging.debug("Fetching cookies from Selenium session...")
+        cf_cookies = driver.get_cookies()
+        logging.info(f"Retrieved {len(cf_cookies)} cookies from Chrome.")
+        return cf_cookies
 
-def build_api_session(cloudflare_cookies: list) -> requests.Session:
+    finally:
+        try:
+            driver.quit()
+            logging.debug("Chrome driver quit successfully.")
+        except Exception as e:
+            logging.error(f"Error quitting Chrome driver: {e}")
+
+
+def build_api_session(cf_cookies):
+    logging.debug("Entering build_api_session()")
     session = requests.Session()
 
-    # Step 1) Copy every cookie from Selenium into requests.Session
-    for c in cloudflare_cookies:
-        rest_dict = {
-            # We include SameSite because requests needs to know about it, unless it's None
-            "SameSite": c.get("sameSite", None) or None,
-            "HttpOnly": c.get("httpOnly", False),
-        }
-        session.cookies.set(
-            name=c["name"],
-            value=c["value"],
-            domain=c.get("domain", None),
-            path=c.get("path", "/"),
-            secure=c.get("secure", False),
-            rest=rest_dict
-        )
+    # Import cookies
+    for c in cf_cookies:
+        logging.debug(f"Adding cookie: {c['name']}={c['value']} (domain={c['domain']}, path={c['path']}, secure={c.get('secure', False)})")
+        rest_dict = {"SameSite": c.get("sameSite", None) or None, "HttpOnly": c.get("httpOnly", False)}
+        try:
+            session.cookies.set(
+                name=c["name"],
+                value=c["value"],
+                domain=c.get("domain", None),
+                path=c.get("path", "/"),
+                secure=c.get("secure", False),
+                rest=rest_dict
+            )
+        except Exception as e:
+            logging.error(f"Failed to set cookie {c['name']}: {e}")
 
-    # Step 2) Clear any existing headers, then inject a Chrome‐like top‐level-navigation header set.
+    # Prepare headers
+    logging.debug("Clearing existing headers and setting Chrome-like headers for initial GET...")
     session.headers.clear()
     session.headers.update({
-        # Exactly copy a real Chrome 115 UA on Windows:
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -205,13 +214,9 @@ def build_api_session(cloudflare_cookies: list) -> requests.Session:
         "Accept-Language": "en-US,en;q=0.9",
         "Cache-Control": "max-age=0",
         "Connection": "keep-alive",
-
-        # — Client Hints (Sec-CH-UA), exactly as Chrome would send on the first navigation:
         'Sec-CH-UA': '"Chromium";v="115", "Google Chrome";v="115", ";Not A Brand";v="99"',
         'Sec-CH-UA-Mobile': '?0',
         'Sec-CH-UA-Platform': '"Windows"',
-
-        # — fetch meta that Chrome includes for typing the URL:
         "Sec-Fetch-Site": "none",
         "Sec-Fetch-Mode": "navigate",
         "Sec-Fetch-User": "?1",
@@ -219,53 +224,45 @@ def build_api_session(cloudflare_cookies: list) -> requests.Session:
         "Upgrade-Insecure-Requests": "1",
     })
 
-    # Step 3) Do a GET to BASE_URL exactly as if the user had typed it into Chrome.
+    logging.debug(f"Headers for initial GET: {session.headers}")
+
+    logging.debug(f"Performing initial GET to {BASE_URL}")
     resp = session.get(BASE_URL, allow_redirects=True)
-    if resp.status_code != 200 or b"Access Denied" in resp.content:
-        print(f"▶▶▶ ERROR: Cloudflare challenge failed (GET {BASE_URL} returned {resp.status_code}).")
-        print(" First 200 bytes of response:", resp.content[:200])
+    logging.debug(f"Initial GET response status: {resp.status_code}")
+    logging.debug(f"Initial GET response headers: {resp.headers}")
+    # Print a snippet of the body, if not 200
+    if resp.status_code != 200:
+        snippet = resp.content[:200] if resp.content else b"<no body>"
+        logging.error(f"Initial GET body snippet: {snippet}")
         raise RuntimeError("Failed to clear Cloudflare challenge on initial GET.")
 
-    # If we got here, CF has dropped any remaining clearance cookie(s) into session.cookies.
+    logging.info("Cloudflare challenge cleared—status 200.")
     return session
 
+
 def main():
-    # 1) Manually log in via undetected_chromedriver, grab cookies
-    cf_cookies = fetch_cloudflare_cookies()
+    logging.debug("Entering main()")
+    try:
+        cf_cookies = fetch_cloudflare_cookies()
+        logging.debug(f"Cloudflare cookies fetched: {len(cf_cookies)}")
+    except Exception as e:
+        logging.error(f"Error in fetch_cloudflare_cookies(): {e}")
+        sys.exit(1)
 
-    # 2) Inject into requests.Session, finish CF challenge
-    session = build_api_session(cf_cookies)
+    try:
+        session = build_api_session(cf_cookies)
+        logging.debug("Requests session built successfully.")
+    except Exception as e:
+        logging.error(f"Error in build_api_session(): {e}")
+        sys.exit(1)
 
-    # 3) Now that CF is happy, we can call any /api/practice endpoint. For example:
-    accounts_resp = session.get("https://demo.trading212.com/api/practice/v2/accounts")
-    if accounts_resp.status_code == 200:
-        print("▶▶▶ SUCCESS: Retrieved accounts:")
-        print(accounts_resp.json())
-    else:
-        print("▶▶▶ ERROR: /accounts returned", accounts_resp.status_code)
-        print(accounts_resp.text[:300])
+    logging.info("Ready to make authenticated API requests!")
+    # ... continue with trading logic, e.g., session.get(...) etc.
 
 
 if __name__ == "__main__":
     main()
 
-def main():
-    # Step 1: launch Chrome, have user log in, collect cookies
-    cf_cookies = fetch_cloudflare_cookies()
-
-    # Step 2: inject those cookies into a requests.Session AND let CF finalize
-    session = build_api_session(cf_cookies)
-
-    # Step 3: now that CF is satisfied, try a simple REST call to T212’s Practice API
-    test_resp = session.get("https://demo.trading212.com/api/practice/v2/accounts")
-    if test_resp.status_code != 200:
-        print("▶▶▶ ERROR: /accounts came back with", test_resp.status_code)
-        print("Response body (first 300 bytes):\n", test_resp.text[:300])
-        return
-
-    accounts = test_resp.json()
-    print("▶▶▶ SUCCESS: Retrieved accounts:")
-    print(json.dumps(accounts, indent=2))
 
 # ----------------------------------------------------------------------------
 # STEP 3: Now write the helper functions that use `session` for the Trading 212 REST calls
