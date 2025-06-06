@@ -120,7 +120,7 @@ if T212_ENV not in ("demo", "live"):
 if T212_ENV == "live":
     BASE_URL = "https://api.trading212.com"
 else:
-    BASE_URL = "https://beta.trading212.com"
+    BASE_URL = "https://demo.trading212.com"
 
 logger.debug(f"T212_ENV (normalized) = {repr(T212_ENV)}")
 logger.debug(f"BASE_URL = {repr(BASE_URL)}")

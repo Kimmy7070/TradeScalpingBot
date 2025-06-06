@@ -1,2 +1,3 @@
-2025/06/06-10:10:57.120 43b4 Creating DB F:\TradeScalpingBot\chrome_profile\Default\shared_proto_db\metadata since it was missing.
-2025/06/06-10:10:57.122 43b4 Reusing MANIFEST F:\TradeScalpingBot\chrome_profile\Default\shared_proto_db\metadata/MANIFEST-000001
+2025/06/06-10:42:33.786 76f0 Reusing MANIFEST F:\TradeScalpingBot\chrome_profile\Default\shared_proto_db\metadata/MANIFEST-000001
+2025/06/06-10:42:33.786 76f0 Recovering log #3
+2025/06/06-10:42:33.786 76f0 Reusing old log F:\TradeScalpingBot\chrome_profile\Default\shared_proto_db\metadata/000003.log 
