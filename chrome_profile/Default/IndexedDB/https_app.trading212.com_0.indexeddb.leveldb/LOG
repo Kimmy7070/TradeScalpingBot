@@ -1,13 +1,14 @@
-2025/06/06-11:17:01.977 1cd4 Reusing MANIFEST F:\TradeScalpingBot\chrome_profile\Default\IndexedDB\https_app.trading212.com_0.indexeddb.leveldb/MANIFEST-000001
-2025/06/06-11:17:01.977 1cd4 Recovering log #7
-2025/06/06-11:17:01.977 1cd4 Reusing old log F:\TradeScalpingBot\chrome_profile\Default\IndexedDB\https_app.trading212.com_0.indexeddb.leveldb/000007.log 
-2025/06/06-11:17:02.245 6f88 Level-0 table #11: started
-2025/06/06-11:17:02.245 6f88 Level-0 table #11: 1630 bytes OK
-2025/06/06-11:17:02.246 6f88 Delete type=0 #7
-2025/06/06-11:17:02.246 1cd4 Manual compaction at level-0 from '\x00\x08\x00\x00\x00' @ 72057594037927935 : 1 .. '\x00\x09\x00\x00\x00' @ 0 : 0; will stop at '\x00\x08\x00\x00\x05' @ 710 : 1
-2025/06/06-11:17:02.246 1cd4 Compacting 1@0 + 1@1 files
-2025/06/06-11:17:02.247 1cd4 Generated table #12@0: 184 keys, 59883 bytes
-2025/06/06-11:17:02.247 1cd4 Compacted 1@0 + 1@1 files => 59883 bytes
-2025/06/06-11:17:02.247 1cd4 compacted to: files[ 0 1 1 0 0 0 0 ]
-2025/06/06-11:17:02.247 1cd4 Delete type=2 #11
-2025/06/06-11:17:02.247 1cd4 Manual compaction at level-0 from '\x00\x08\x00\x00\x05' @ 710 : 1 .. '\x00\x09\x00\x00\x00' @ 0 : 0; will stop at (end)
+2025/06/06-11:23:49.867 719c Reusing MANIFEST F:\TradeScalpingBot\chrome_profile\Default\IndexedDB\https_app.trading212.com_0.indexeddb.leveldb/MANIFEST-000001
+2025/06/06-11:23:49.867 719c Recovering log #18
+2025/06/06-11:23:49.867 719c Reusing old log F:\TradeScalpingBot\chrome_profile\Default\IndexedDB\https_app.trading212.com_0.indexeddb.leveldb/000018.log 
+2025/06/06-11:23:49.867 719c Delete type=2 #16
+2025/06/06-11:23:50.134 7050 Level-0 table #23: started
+2025/06/06-11:23:50.135 7050 Level-0 table #23: 2040 bytes OK
+2025/06/06-11:23:50.136 7050 Delete type=0 #18
+2025/06/06-11:23:50.136 719c Manual compaction at level-0 from '\x00\x0b\x00\x00\x00' @ 72057594037927935 : 1 .. '\x00\x0c\x00\x00\x00' @ 0 : 0; will stop at '\x00\x0b\x00\x00\x05' @ 977 : 1
+2025/06/06-11:23:50.136 719c Compacting 1@0 + 1@1 files
+2025/06/06-11:23:50.137 719c Generated table #24@0: 193 keys, 60042 bytes
+2025/06/06-11:23:50.137 719c Compacted 1@0 + 1@1 files => 60042 bytes
+2025/06/06-11:23:50.137 719c compacted to: files[ 0 1 1 0 0 0 0 ]
+2025/06/06-11:23:50.137 719c Delete type=2 #23
+2025/06/06-11:23:50.138 719c Manual compaction at level-0 from '\x00\x0b\x00\x00\x05' @ 977 : 1 .. '\x00\x0c\x00\x00\x00' @ 0 : 0; will stop at (end)
