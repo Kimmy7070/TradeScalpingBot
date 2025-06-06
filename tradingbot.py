@@ -169,23 +169,15 @@ def fetch_cloudflare_cookies() -> list:
     print(f"▶▶▶ INFO: Chrome closed; retrieved {len(all_cookies)} cookies.\n")
     return all_cookies
 
-
 def build_api_session(cloudflare_cookies: list) -> requests.Session:
-    """
-    1) Inject every cookie exactly as Chrome saw it (including domains ".trading212.com"
-       and "app.trading212.com"). Use `rest={'HttpOnly': …}` so that HttpOnly flags are honored.
-    2) Immediately do one GET to BASE_URL, but with a full browser-style header set. This lets
-       Cloudflare finish its JS/redirect challenge and drop the final clearance tokens.
-    3) If that GET returns 200 and does NOT contain “Access Denied,” then we’re free to call any
-       /api/practice/... endpoint afterwards.
-    """
     session = requests.Session()
 
-    # 1) Inject every single cookie from Selenium into our requests.Session
+    # Step 1) Copy every cookie from Selenium into requests.Session
     for c in cloudflare_cookies:
         rest_dict = {
+            # We include SameSite because requests needs to know about it, unless it's None
+            "SameSite": c.get("sameSite", None) or None,
             "HttpOnly": c.get("httpOnly", False),
-            "SameSite": c.get("sameSite", None) or None
         }
         session.cookies.set(
             name=c["name"],
@@ -196,10 +188,10 @@ def build_api_session(cloudflare_cookies: list) -> requests.Session:
             rest=rest_dict
         )
 
-    # 2) Now set a full browser-style header block before we do the “pass-through” GET
+    # Step 2) Clear any existing headers, then inject a Chrome‐like top‐level-navigation header set.
     session.headers.clear()
     session.headers.update({
-        # Mimic a standard Chrome UA
+        # Exactly copy a real Chrome 115 UA on Windows:
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -207,13 +199,19 @@ def build_api_session(cloudflare_cookies: list) -> requests.Session:
         ),
         "Accept": (
             "text/html,application/xhtml+xml,application/xml;"
-            "q=0.9,image/webp,image/apng,*/*;q=0.8"
+            "q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8"
         ),
+        "Accept-Encoding": "gzip, deflate, br",
         "Accept-Language": "en-US,en;q=0.9",
-        # Note: requests will automatically send “Accept-Encoding: gzip, deflate, br”
-        # so you don’t need to add it explicitly.
-        "Referer": BASE_URL + "/",
-        "Origin": BASE_URL,
+        "Cache-Control": "max-age=0",
+        "Connection": "keep-alive",
+
+        # — Client Hints (Sec-CH-UA), exactly as Chrome would send on the first navigation:
+        'Sec-CH-UA': '"Chromium";v="115", "Google Chrome";v="115", ";Not A Brand";v="99"',
+        'Sec-CH-UA-Mobile': '?0',
+        'Sec-CH-UA-Platform': '"Windows"',
+
+        # — fetch meta that Chrome includes for typing the URL:
         "Sec-Fetch-Site": "none",
         "Sec-Fetch-Mode": "navigate",
         "Sec-Fetch-User": "?1",
@@ -221,17 +219,15 @@ def build_api_session(cloudflare_cookies: list) -> requests.Session:
         "Upgrade-Insecure-Requests": "1",
     })
 
-    # 3) Do one GET to BASE_URL so that Cloudflare’s JS challenge can finish.
-    #    If CF is satisfied, this will hand us back the normal PRACTICE portfolio HTML with HTTP 200.
+    # Step 3) Do a GET to BASE_URL exactly as if the user had typed it into Chrome.
     resp = session.get(BASE_URL, allow_redirects=True)
     if resp.status_code != 200 or b"Access Denied" in resp.content:
         print(f"▶▶▶ ERROR: Cloudflare challenge failed (GET {BASE_URL} returned {resp.status_code}).")
         print(" First 200 bytes of response:", resp.content[:200])
         raise RuntimeError("Failed to clear Cloudflare challenge on initial GET.")
 
-    # At this point, session.cookies now contains all CF clearance tokens (cf_clearance, etc.).
+    # If we got here, CF has dropped any remaining clearance cookie(s) into session.cookies.
     return session
-
 
 def main():
     # 1) Manually log in via undetected_chromedriver, grab cookies
