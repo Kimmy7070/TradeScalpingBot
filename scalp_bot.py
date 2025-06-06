@@ -120,7 +120,7 @@ if T212_ENV not in ("demo", "live"):
 if T212_ENV == "live":
     BASE_URL = "https://api.trading212.com"
 else:
-    BASE_URL = "https://demo.trading212.com"
+    BASE_URL = "https://beta.trading212.com"
 
 logger.debug(f"T212_ENV (normalized) = {repr(T212_ENV)}")
 logger.debug(f"BASE_URL = {repr(BASE_URL)}")
@@ -145,39 +145,51 @@ def safe_sleep(seconds: float):
 
 def fetch_cloudflare_cookies():
     """
-    Launches an undetected-chromedriver browser and points it to the Trading 212 beta/practice URL.
-    Once the CF challenge is solved (you may have to log in and switch to Practice manually),
-    we grab the cookies and return them for use by `requests`.
+    Opens a visible undetected‐Chrome window pointed at beta.trading212.com using
+    a persistent user‐data‐dir so that you only have to log in once. After you login
+    and switch to Practice/Demo mode, hit ENTER in your terminal. Then we grab cookies,
+    close the browser, and return them for the rest of the script to use.
     """
+
+    from selenium.webdriver.chrome.options import Options
+    import os
+
+    # ---- configure ChromeOptions to use a persistent profile folder on disk ----
     chrome_options = uc.ChromeOptions()
-    chrome_options.headless = False  # so you can see & interact
-    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-    chrome_options.add_argument("--start-maximized")
 
-    # ───────── Change starts here ─────────
-    # Instead of pointing at BASE_URL (root), go directly to /beta
-    cf_url = f"{BASE_URL}/beta"
-    # ───────── Change ends here ─────────
+    # create a "chrome_profile" folder alongside the bot, if it doesn't exist:
+    profile_path = os.path.join(os.getcwd(), "chrome_profile")
+    if not os.path.isdir(profile_path):
+        os.makedirs(profile_path)
 
+    # tell Chrome to keep its profile in that folder (so cookies/session survive)
+    chrome_options.add_argument(f"--user-data-dir={profile_path}")
+
+    # we want a visible window so you can log in manually once
+    # (do NOT add "--headless")
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+
+    print("▶▶▶ INFO: Launching Chrome (undetected) so you can log in to Trading 212…")
     driver = uc.Chrome(options=chrome_options)
-    driver.get(cf_url)
 
-    # Wait up to 60 seconds for CF clearance cookie to appear
-    timeout = 60
-    start = time.time()
-    while time.time() - start < timeout:
-        cookies = driver.get_cookies()
-        # Trading 212’s CF clearance cookie is usually named "__cf_bm" or "__cfduid"
-        if any(c["name"].startswith("__cf") for c in cookies):
-            # Convert Selenium cookies to a Requests‐style dict
-            cf_cookies = {c["name"]: c["value"] for c in cookies}
-            driver.quit()
-            return cf_cookies
-        time.sleep(1)
+    # point at the new BASE_URL (beta domain)
+    driver.get(BASE_URL)
 
+    print()
+    print("────────── WAIT FOR MANUAL LOGIN ──────────")
+    print("  • In the Chrome window that just opened, log in to your Trading 212 account.")
+    print("  • Once you’re fully logged in, be sure to switch to your “Practice/Demo” account.")
+    print("  • When you see your Practice portfolio screen in the browser, come back here")
+    print("    and press ENTER in this terminal. ▶▶▶")
+    input()  # pause until you hit Enter
+
+    # fetch all cookies now that you're authenticated:
+    cookies = driver.get_cookies()
+
+    print("▶▶▶ INFO: Closing Chrome; session cookies saved.")
     driver.quit()
-    raise RuntimeError("❌ Timed out waiting for Cloudflare clearance cookie. "
-                       "Either CF challenge failed or your IP is blocked.")
+    return cookies
 
 # ----------------------------------------------------------------------------
 # STEP 2: Build a normal requests.Session() using those cookies + browser headers
